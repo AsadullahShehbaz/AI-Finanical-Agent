@@ -1,269 +1,330 @@
-# app.py
-# 🚀 Smart Memory AI Agent
-# Streamlit + Gemini + Mem0 + Qdrant + MySQL Auth + Persistent Memory
-# Beautiful ChatGPT-style interface with bottom input and chat bubbles
-
 import streamlit as st
-from dotenv import load_dotenv
-from mem0 import Memory
-import google.generativeai as genai
+from datetime import datetime
+import logging
+from main import initialize_agents, process_agent_query
 
-from qdrant_client import QdrantClient
-import mysql.connector
-import bcrypt
-import os
-import json
-import warnings
-from pathlib import Path
+logger = logging.getLogger(__name__)
 
-# -----------------------------
-# Basic Config
-# -----------------------------
-warnings.filterwarnings("ignore", category=ImportWarning)
-load_dotenv()
-
-# API Keys
-GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-QDRANT_API_KEY = st.secrets["QDRANT_API_KEY"]
-QDRANT_URL = st.secrets["QDRANT_URL"]
-
-
-NEO4J_URI = st.secrets["NEO4J_URI"]
-NEO4J_USERNAME = st.secrets["NEO4J_USERNAME"]
-NEO4J_PASSWORD = st.secrets["NEO4J_PASSWORD"]
-
-# -----------------------------
-# MySQL Connection
-# -----------------------------
-conn = mysql.connector.connect(
-    host=st.secrets["MYSQL_HOST"],
-    port=st.secrets["MYSQL_PORT"],
-    user=st.secrets["MYSQL_USER"],
-    password=st.secrets["MYSQL_PASSWORD"],
-    database=st.secrets["MYSQL_DB"]
+# Page configuration
+st.set_page_config(
+    page_title="Multi-Agent AI System",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
-cursor = conn.cursor(dictionary=True)
-
-# Create users table if not exists
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
-""")
-conn.commit()
-
-# -----------------------------
-# Qdrant + Gemini Config
-# -----------------------------
-qdrant_client = QdrantClient(
-    url=QDRANT_URL,
-    api_key=QDRANT_API_KEY,
-    timeout=30.0,
-    prefer_grpc=False
-)
-genai.configure(api_key=GEMINI_API_KEY)
-
-# Create the model
-genai_client = genai.GenerativeModel(model_name="gemini-2.0-flash")
-
-
-config = {
-    "version": "v1.1",
-    "embedder": {
-        "provider": "gemini",
-        "config": {"model": "models/text-embedding-004"
-                  }
-    },
-    "llm": {
-        "provider": "gemini", 
-        "config": {
-            "api_key": GEMINI_API_KEY, 
-            "model": "models/gemini-2.0-flash"
-        }
-    },
-    "graph_store":{
-        "provider":"neo4j",
-        "config":{ 
-            "url" : NEO4J_URI , 
-            "username" : NEO4J_USERNAME , 
-            "password" : NEO4J_PASSWORD
-            }
-    },
-    "vector_store": {
-        "provider": "qdrant",
-        "config": {
-            "url": QDRANT_URL,
-            "api_key": QDRANT_API_KEY,
-            "collection_name": "memory_agent",
-            "embedding_model_dims": 768
-        }
-    },
-}
-mem_client = Memory.from_config(config)
-
-# -----------------------------
-# Auth Functions
-# -----------------------------
-def register_user(email, password):
-    try:
-        hashed_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
-        cursor.execute("INSERT INTO users (email, password_hash) VALUES (%s, %s)", (email, hashed_password.decode()))
-        conn.commit()
-        return True
-    except mysql.connector.Error as err:
-        print("Error:", err)
-        return False
-
-
-def authenticate_user(email, password):
-    cursor.execute("SELECT * FROM users WHERE email = %s", (email,))
-    user = cursor.fetchone()
-    if user and bcrypt.checkpw(password.encode(), user["password_hash"].encode()):
-        return user["email"]  # ✅ use email as unique identifier
-    return None
-
-# -----------------------------
-# Streamlit Layout
-# -----------------------------
-st.set_page_config(page_title="Smart Memory AI Agent", page_icon="🤖", layout="wide")
 
 # Custom CSS
-st.markdown(
-    """
+st.markdown("""
     <style>
-    body, .stApp { background-color: #0F111A; color: #E0E0E0; }
-    footer {visibility: hidden;}
-    .chat-container { max-height: 70vh; overflow-y: auto; padding: 10px; }
-    .user-msg { background: linear-gradient(135deg,#3B82F6,#2563EB); color:white; padding:12px; border-radius:15px; margin:5px 0; max-width:70%; float:right; clear:both;}
-    .ai-msg { background: linear-gradient(135deg,#FBBF24,#F59E0B); color:black; padding:12px; border-radius:15px; margin:5px 0; max-width:70%; float:left; clear:both;}
-    .input-container { position: fixed; bottom: 10px; width: 90%; left: 5%; display: flex; background-color: #1F2937; padding:10px; border-radius:10px; }
-    .stTextInput>div>div>input { background-color:#374151; color:#E0E0E0; border-radius:10px; padding:10px; border:none; width:100%; }
+    .main {
+        padding: 2rem;
+    }
+    
+    .agent-response {
+        background-color: rgba(28, 131, 225, 0.1);
+        border-radius: 10px;
+        padding: 20px;
+        margin: 15px 0;
+        border-left: 4px solid #4CAF50;
+        color: inherit;
+    }
+    
+    .agent-response h1, .agent-response h2, .agent-response h3,
+    .agent-response h4, .agent-response h5, .agent-response h6,
+    .agent-response p, .agent-response li, .agent-response td, 
+    .agent-response th, .agent-response span {
+        color: inherit !important;
+    }
+    
+    .agent-response table {
+        color: inherit !important;
+        border-collapse: collapse;
+        width: 100%;
+        margin: 10px 0;
+    }
+    
+    .agent-response table th {
+        background-color: rgba(28, 131, 225, 0.2);
+        padding: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    .agent-response table td {
+        padding: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    
+    .query-box {
+        background-color: rgba(28, 131, 225, 0.05);
+        border-radius: 8px;
+        padding: 15px;
+        margin: 10px 0;
+        border-left: 3px solid #1f77b4;
+    }
+    
+    .agent-card {
+        background-color: rgba(76, 175, 80, 0.1);
+        border-radius: 8px;
+        padding: 15px;
+        margin: 10px 0;
+        border-left: 3px solid #4CAF50;
+    }
+    
+    .stButton>button {
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
     </style>
-    """,
-    unsafe_allow_html=True
-)
+    """, unsafe_allow_html=True)
 
-st.title("🧠 Smart Memory AI Agent")
-st.markdown(
-    """
-    **Powered by Gemini + Mem0 + Qdrant + MySQL + Neo4j**  
-    💬 Personalized Memory | ⚡ Persistent AI | ☁️ Cloud-Ready 
-    """,
-    unsafe_allow_html=True
-)
+# Initialize session state
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
+if 'total_queries' not in st.session_state:
+    st.session_state.total_queries = 0
+if 'process_query' not in st.session_state:
+    st.session_state.process_query = False
+if 'current_query' not in st.session_state:
+    st.session_state.current_query = ""
 
-# -----------------------------
-# Sidebar Auth System
-# -----------------------------
-st.sidebar.markdown("🤖 **Welcome to Smart Memory AI Agent**")
+def render_sidebar():
+    """Render sidebar content"""
+    with st.sidebar:
+        st.markdown("## 🤖 Multi-Agent AI System")
+        st.markdown("---")
+        
+        st.markdown("""
+        ### 🎯 Agent Team
+        This system uses multiple specialized AI agents:
+        """)
+        
+        st.markdown("""
+        <div class='agent-card'>
+            <strong>🌐 Web Agent</strong><br>
+            <small>Searches the web for real-time information</small>
+        </div>
+        <div class='agent-card'>
+            <strong>💰 Finance Agent</strong><br>
+            <small>Analyzes financial data and metrics</small>
+        </div>
+        <div class='agent-card'>
+            <strong>🤝 Team Coordinator</strong><br>
+            <small>Orchestrates agent collaboration</small>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        st.markdown("### 📊 Session Stats")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Queries", st.session_state.total_queries)
+        with col2:
+            st.metric("History", len(st.session_state.chat_history))
+        
+        st.markdown("---")
+        
+        st.markdown("""
+        ### 👨‍💻 Asadullah Shehbaz
+        **AI Engineer**
+        """)
+        
+        st.markdown("---")
+        
+        if st.button("🗑️ Clear History", use_container_width=True):
+            st.session_state.chat_history = []
+            st.session_state.total_queries = 0
+            logger.info("Chat history cleared")
+            st.rerun()
 
-if "user_email" not in st.session_state:
-    option = st.sidebar.radio("Choose an option:", ["Login", "Register"])
+def render_quick_actions():
+    """Render quick action buttons"""
+    st.markdown("### 🔥 Quick Analysis")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("📊 NVDA Analysis", use_container_width=True):
+            st.session_state.current_query = "Provide detailed analysis and recent information about NVDA stock"
+            st.session_state.process_query = True
+            logger.info("Quick query: NVDA")
+    with col2:
+        if st.button("🍎 AAPL Insights", use_container_width=True):
+            st.session_state.current_query = "Provide detailed analysis and recent information about AAPL stock"
+            st.session_state.process_query = True
+            logger.info("Quick query: AAPL")
+    with col3:
+        if st.button("🔋 TSLA Report", use_container_width=True):
+            st.session_state.current_query = "Provide detailed analysis and recent information about TSLA stock"
+            st.session_state.process_query = True
+            logger.info("Quick query: TSLA")
+    
+    st.markdown("---")
+    
+    st.markdown("### 💡 Analysis Types")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        if st.button("📈 Tech Stocks", use_container_width=True):
+            st.session_state.current_query = "What are the current trends in major technology stocks?"
+            st.session_state.process_query = True
+    with col2:
+        if st.button("💰 Market Overview", use_container_width=True):
+            st.session_state.current_query = "Provide an overview of current stock market conditions"
+            st.session_state.process_query = True
+    with col3:
+        if st.button("🏦 Economic News", use_container_width=True):
+            st.session_state.current_query = "What are the latest important economic developments?"
+            st.session_state.process_query = True
+    with col4:
+        if st.button("🌍 Global Markets", use_container_width=True):
+            st.session_state.current_query = "Provide information about global stock market performance"
+            st.session_state.process_query = True
 
-    if option == "Register":
-        email = st.sidebar.text_input("Email", key="reg_email")
-        password = st.sidebar.text_input("Password", type="password", key="reg_pass")
-        if st.sidebar.button("Register"):
-            if email and password:
-                if register_user(email, password):
-                    st.sidebar.success("✅ Registered successfully! Please login.")
-                else:
-                    st.sidebar.error("❌ Email already exists or DB error.")
-            else:
-                st.sidebar.warning("Please enter both fields.")
-
-    elif option == "Login":
-        email = st.sidebar.text_input("Email", key="login_email")
-        password = st.sidebar.text_input("Password", type="password", key="login_pass")
-        if st.sidebar.button("Login"):
-            user_email = authenticate_user(email, password)
-            if user_email:
-                st.session_state.user_email = user_email
-                st.sidebar.success(f"🎉 Welcome back, {user_email}!")
-                st.rerun()
-            else:
-                st.sidebar.error("Invalid email or password")
-
-else:
-    st.sidebar.markdown(f"👋 **Logged in as {st.session_state.user_email}**")
-    st.sidebar.success("Session Active ✅")
-    if st.sidebar.button("Logout"):
-        for key in ["user_email", "chat_history"]:
-            st.session_state.pop(key, None)
-        st.sidebar.info("Logged out successfully!")
-        st.rerun()
-
-# -----------------------------
-# Chat Section (After Login)
-# -----------------------------
-if "user_email" in st.session_state:
-    user_id = st.session_state.user_email  # ✅ use email as identifier
-
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
-
-    # Chat Display
-    chat_container = st.container()
-    with chat_container:
-        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
-        for chat in st.session_state.chat_history:
-            st.markdown(f'<div class="user-msg"><b>You:</b> {chat["user"]}</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="ai-msg"><b>AI:</b> {chat["ai"]}</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    # Message Input
-    def submit_message():
-        user_query = st.session_state.user_input.strip()
-        if not user_query:
-            return
-
-        # Retrieve memory
-        search_memory = mem_client.search(query=user_query, user_id=user_id)
-        memories = [f"Memory: {mem.get('memory')}" for mem in search_memory.get('results', [])]
-
-        system_prompt = f"""
-        You are a helpful AI Assistant.
-        User context (from previous chats):
-        {json.dumps(memories, indent=2)}
-        User message: {user_query}
-        """
-
-        response = genai_client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=system_prompt
+def render_query_input():
+    """Render main query input section"""
+    st.markdown("### 🔍 Custom Query")
+    col_input, col_button = st.columns([4, 1])
+    
+    with col_input:
+        user_query = st.text_input(
+            "Enter your query:",
+            value="",
+            placeholder="e.g., Analyze NVDA stock and provide recent information",
+            label_visibility="collapsed",
+            key="user_input"
         )
-        ai_response = response.text
+    
+    with col_button:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🚀 Analyze", use_container_width=True, type="primary"):
+            if user_query:
+                st.session_state.current_query = user_query
+                st.session_state.process_query = True
+                logger.info(f"Custom query submitted: {user_query}")
 
-        # Store in memory
-        mem_client.add(user_id=user_id, messages=[
-            {"role": "user", "content": user_query},
-            {"role": "assistant", "content": ai_response}
-        ])
+def process_query():
+    """Process the current query"""
+    if st.session_state.process_query and st.session_state.current_query:
+        query_to_process = st.session_state.current_query
+        st.session_state.total_queries += 1
+        logger.info(f"Processing query #{st.session_state.total_queries}: {query_to_process}")
+        
+        # Reset flag
+        st.session_state.process_query = False
+        
+        with st.spinner("🤖 Agent team is analyzing your query..."):
+            try:
+                # Initialize agents
+                logger.info("Initializing agent team...")
+                agent_team = initialize_agents()
+                
+                if agent_team:
+                    # Display query
+                    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    st.markdown(f'<div class="query-box"><strong>📝 Query:</strong> {query_to_process}<br><small>⏰ {timestamp}</small></div>', unsafe_allow_html=True)
+                    
+                    st.markdown("**🤖 Agent Response:**")
+                    
+                    # Get response with error handling
+                    logger.info("Processing query through agent team...")
+                    full_response = process_agent_query(agent_team, query_to_process)
+                    logger.info(f"Response received: {len(full_response)} characters")
+                    
+                    # Display response
+                    st.markdown(f'<div class="agent-response">', unsafe_allow_html=True)
+                    st.markdown(full_response)
+                    st.markdown('</div>', unsafe_allow_html=True)
+                    
+                    # Add to chat history
+                    st.session_state.chat_history.append({
+                        "query": query_to_process,
+                        "response": full_response,
+                        "timestamp": timestamp
+                    })
+                    logger.info("Query added to chat history")
+                    
+                    st.success("✅ Analysis complete!")
+                    
+                else:
+                    logger.error("Agent team initialization failed")
+                    st.error("❌ Failed to initialize agent team. Check logs for details.")
+                    
+            except Exception as e:
+                logger.error(f"Error processing query: {str(e)}", exc_info=True)
+                st.error(f"❌ Error: {str(e)}")
+                
+                if "tool_use_failed" in str(e):
+                    st.warning("⚠️ The web search tool encountered an issue. The agents will try to provide information from their knowledge base.")
+                
+                st.info("💡 **Troubleshooting Tips:**")
+                st.markdown("""
+                - Try rephrasing your query more simply
+                - Check your GROQ_API_KEY in .env file
+                - Verify internet connection
+                - Try asking about a single topic instead of multiple topics
+                """)
 
-        # Update chat history
-        st.session_state.chat_history.append({"user": user_query, "ai": ai_response})
-        st.session_state.user_input = ""
+def render_chat_history():
+    """Render chat history section"""
+    if st.session_state.chat_history:
+        st.markdown("---")
+        st.markdown("## 📜 Analysis History")
+        
+        for idx, chat in enumerate(reversed(st.session_state.chat_history)):
+            with st.expander(f"💬 Query {len(st.session_state.chat_history) - idx}: {chat['query'][:60]}... ({chat['timestamp']})"):
+                st.markdown(f"**📝 Query:** {chat['query']}")
+                st.markdown(f"**⏰ Timestamp:** {chat['timestamp']}")
+                st.markdown("**🤖 Response:**")
+                st.markdown(f'<div class="agent-response">', unsafe_allow_html=True)
+                st.markdown(chat["response"])
+                st.markdown('</div>', unsafe_allow_html=True)
 
-    # Bottom Input Box
-    st.markdown('<div class="input-container">', unsafe_allow_html=True)
-    st.text_input("", key="user_input", placeholder="Type your message and press Enter...", on_change=submit_message)
-    st.markdown('</div>', unsafe_allow_html=True)
+def render_footer():
+    """Render footer section"""
+    st.markdown("---")
+    st.markdown("""
+    <div style='text-align: center; padding: 20px;'>
+        <p><strong>🚀 Technology Stack</strong></p>
+        <p>
+            <b>Framework:</b> Streamlit | 
+            <b>AI:</b> Phi Agent | 
+            <b>LLM:</b> Groq (LLaMA 3.3 70B)
+        </p>
+        <p style='margin-top: 15px;'>
+            <b>Agents:</b> Web Agent + Finance Agent + Team Coordinator
+        </p>
+        <p style='margin-top: 20px; font-size: 0.9rem;'>
+            💡 Multi-Agent AI System for Comprehensive Analysis<br>
+            
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # Sidebar Utilities
-    if st.sidebar.button("🧹 Clear Chat"):
-        st.session_state.chat_history = []
-        st.sidebar.success("Chat cleared.")
+def main():
+    """Main application function"""
+    render_sidebar()
+    
+    st.title("🤖 AI Finance Agent")
+    st.markdown("Powered by Web Agent + Finance Agent working together")
+    
+    render_quick_actions()
+    st.markdown("---")
+    render_query_input()
+    
+    process_query()
+    render_chat_history()
+    render_footer()
 
-    if st.sidebar.button("🗑️ Clear Memory"):
-        mem_client.clear(user_id=user_id)
-        st.sidebar.success("Memory cleared successfully!")
-
-    if st.sidebar.button("📁 Download Memory"):
-        mem_client.download(user_id=user_id)
-        st.sidebar.success("Memory downloaded successfully!")
-
-
-
+if __name__ == "__main__":
+    try:
+        logger.info("Starting Multi-Agent AI System application")
+        main()
+    except Exception as e:
+        logger.critical(f"Critical error in main application: {str(e)}", exc_info=True)
+        st.error(f"❌ Critical Error: {str(e)}")
